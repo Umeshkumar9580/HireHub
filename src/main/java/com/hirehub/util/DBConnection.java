@@ -1,4 +1,5 @@
-package com.hirehub.util;
+
+        package com.hirehub.util;
 
 import com.hirehub.exception.DatabaseException;
 
@@ -9,41 +10,70 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.Properties;
 
-/**
- * Loads JDBC settings from {@code db.properties} on the classpath and opens
- * MySQL connections. Callers must close the returned connection (try-with-resources).
- */
 public final class DBConnection {
 
     private static final String PROPERTIES_FILE = "db.properties";
     private static final String DRIVER_CLASS_NAME = "com.mysql.cj.jdbc.Driver";
     private static final Object LOCK = new Object();
+
     private static Properties properties;
     private static volatile boolean driverLoaded = false;
 
     private DBConnection() {
     }
 
-    /**
-     * Opens a new JDBC connection using DriverManager.
-     *
-     * @return an open connection; never null when the call succeeds
-     * @throws DatabaseException if the properties file is missing, driver is missing, or MySQL cannot be reached
-     */
     public static Connection getConnection() {
         loadDriver();
-        Properties config = loadProperties();
-        String url = required(config, "db.url");
-        String username = required(config, "db.username");
-        String password = config.getProperty("db.password", "");
+
+        String url = System.getenv("DB_URL");
+        String username = System.getenv("DB_USER");
+        String password = System.getenv("DB_PASSWORD");
+
+        // Use individual Aiven settings if DB_URL is not supplied.
+        if (url == null || url.isBlank()) {
+            String host = System.getenv("DB_HOST");
+            String port = System.getenv("DB_PORT");
+            String database = System.getenv("DB_NAME");
+
+            if (host != null && !host.isBlank()
+                    && port != null && !port.isBlank()
+                    && database != null && !database.isBlank()) {
+
+                String sslMode = System.getenv("DB_SSL_MODE");
+                if (sslMode == null || sslMode.isBlank()) {
+                    sslMode = "REQUIRED";
+                }
+
+                url = "jdbc:mysql://" + host + ":" + port + "/" + database
+                        + "?sslMode=" + sslMode;
+            }
+        }
+
+        // Fall back to db.properties for local development.
+        if (url == null || url.isBlank()
+                || username == null || username.isBlank()
+                || password == null) {
+
+            Properties config = loadProperties();
+
+            if (url == null || url.isBlank()) {
+                url = required(config, "db.url");
+            }
+            if (username == null || username.isBlank()) {
+                username = required(config, "db.username");
+            }
+            if (password == null) {
+                password = config.getProperty("db.password", "");
+            }
+        }
 
         try {
             return DriverManager.getConnection(url, username, password);
         } catch (SQLException e) {
             throw new DatabaseException(
                     "Unable to connect to the HireHub database. "
-                            + "Confirm MySQL is running, database 'hirehub' exists, "
-                            + "and src/main/resources/db.properties has the correct URL, username, and password.",
+                            + "Check the database host, port, database name, "
+                            + "credentials, and SSL configuration.",
                     e);
         }
     }
@@ -53,21 +83,11 @@ public final class DBConnection {
             synchronized (LOCK) {
                 if (!driverLoaded) {
                     try {
-                        try {
-                            Class.forName(DRIVER_CLASS_NAME);
-                        } catch (ClassNotFoundException e) {
-                            ClassLoader cl = Thread.currentThread().getContextClassLoader();
-                            if (cl != null) {
-                                Class.forName(DRIVER_CLASS_NAME, true, cl);
-                            } else {
-                                throw e;
-                            }
-                        }
+                        Class.forName(DRIVER_CLASS_NAME);
                         driverLoaded = true;
                     } catch (ClassNotFoundException e) {
                         throw new DatabaseException(
-                                "MySQL JDBC Driver class not found: " + DRIVER_CLASS_NAME
-                                        + ". Ensure mysql-connector-j is included in the application classpath (WEB-INF/lib).",
+                                "MySQL JDBC Driver not found: " + DRIVER_CLASS_NAME,
                                 e);
                     }
                 }
@@ -82,16 +102,20 @@ public final class DBConnection {
             }
 
             ClassLoader cl = Thread.currentThread().getContextClassLoader();
-            InputStream input = cl != null ? cl.getResourceAsStream(PROPERTIES_FILE) : null;
+            InputStream input = cl != null
+                    ? cl.getResourceAsStream(PROPERTIES_FILE)
+                    : null;
+
             if (input == null) {
-                input = DBConnection.class.getClassLoader().getResourceAsStream(PROPERTIES_FILE);
+                input = DBConnection.class.getClassLoader()
+                        .getResourceAsStream(PROPERTIES_FILE);
             }
 
             if (input == null) {
                 throw new DatabaseException(
-                        "Missing classpath file db.properties. "
-                                + "Copy src/main/resources/db.properties.example to "
-                                + "src/main/resources/db.properties and set your local MySQL password.");
+                        "Missing db.properties and database environment variables. "
+                                + "Configure DB_HOST, DB_PORT, DB_NAME, DB_USER, "
+                                + "and DB_PASSWORD on the hosting platform.");
             }
 
             try (InputStream in = input) {
@@ -100,16 +124,20 @@ public final class DBConnection {
                 properties = loaded;
                 return properties;
             } catch (IOException e) {
-                throw new DatabaseException("Failed to read db.properties from the classpath: " + e.getMessage(), e);
+                throw new DatabaseException(
+                        "Failed to read db.properties: " + e.getMessage(), e);
             }
         }
     }
 
     private static String required(Properties config, String key) {
         String value = config.getProperty(key);
+
         if (value == null || value.isBlank()) {
-            throw new DatabaseException("db.properties is missing required key: " + key);
+            throw new DatabaseException(
+                    "db.properties is missing required key: " + key);
         }
+
         return value.trim();
     }
 }
